@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <!--
+    KonfiLog – Mobile‑First Konfirmanden‑Logbuch mit PWA und DSGVO‑Hinweisen
+
+    Diese Datei implementiert eine eigenständige Web‑App, die komplett ohne Build‑Tools
+    läuft. Sie umfasst Login/Registrierung mit Firebase Authentication, Firestore
+    für Datenhaltung, Rollen (Konfirmand*in, Aufsicht, Administrator) sowie ein
+    einfaches Punkte‑System. Darüber hinaus ist die App als Progressive Web App
+    (PWA) ausgelegt: ein Manifest (manifest.json) und ein Service Worker (sw.js)
+    sorgen dafür, dass sie offline funktioniert und zum Startbildschirm hinzugefügt
+    werden kann. Die App zeigt einen Fortschrittsbalken für den Punktestand und
+    protokolliert Kirchenbesuche oder Aktivitäten mit Standortdaten (nach
+    expliziter Einwilligung). Bitte ersetzen Sie die Platzhalter im
+    Datenschutzhinweis und im Impressum durch die tatsächlichen Daten Ihrer
+    Kirchengemeinde.
+
+    Hinweis: Damit die App korrekt mit Firebase funktioniert, müssen Sie in
+    Firebase folgende Dinge einrichten:
+      • E‑Mail/Passwort‑Authentifizierung aktivieren.
+      • Ihre GitHub Pages‑Domain zu den autorisierten Domains hinzufügen.
+      • Firestore Security Rules wie in dieser Datei vorgeschlagen setzen.
+      • Einen reCAPTCHA v3 Site‑Key in App Check konfigurieren und weiter unten
+        eintragen (YOUR_RECAPTCHA_V3_SITE_KEY).
+      • Einen Composite‑Index für die Collection „visits“ (Felder: uid ASC,
+        createdAt DESC) anlegen, damit die Daten effizient geladen werden können.
+  -->
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <link rel="manifest" href="manifest.json" />
+  <title>KonfiLog</title>
+  <style>
+    :root {
+      --bg:#f8fafc;
+      --card:#ffffff;
+      --text:#111827;
+      --muted:#6b7280;
+      --primary:#111827;
+      --radius:16px;
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      background:var(--bg);
+      color:var(--text);
+      font:16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial;
+    }
+    a { color:var(--primary); text-decoration:none; }
+    .wrap { max-width:640px; margin:0 auto; padding:16px; }
+    .card {
+      background:var(--card);
+      border-radius:var(--radius);
+      padding:20px;
+      box-shadow:0 10px 24px rgba(0,0,0,.06);
+    }
+    h1, h2 { margin:0 0 12px; }
+    .muted { color:var(--muted); }
+    label { display:block; font-size:14px; color:var(--muted); margin:10px 0 4px; }
+    input, select { width:100%; padding:12px 14px; border:1px solid #e5e7eb; border-radius:12px; font-size:16px; }
+    button {
+      width:100%;
+      padding:12px 16px;
+      border:0;
+      border-radius:14px;
+      font-weight:600;
+      background:var(--primary);
+      color:#fff;
+      box-shadow:0 6px 14px rgba(17,24,39,.15);
+      cursor:pointer;
+    }
+    button:disabled { opacity:.6; cursor:default; }
+    .link { color:var(--primary); text-decoration:underline; background:none; border:none; padding:0; font-size:inherit; cursor:pointer; }
+    .row { display:grid; gap:12px; }
+    .nav {
+      position:sticky;
+      top:0;
+      backdrop-filter:blur(8px);
+      background:rgba(255,255,255,.85);
+      border-bottom:1px solid #e5e7eb;
+      padding:10px 16px;
+    }
+    .nav-inner { max-width:640px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; }
+    .progress { height:12px; background:#e5e7eb; border-radius:999px; overflow:hidden; }
+    .progress-bar { height:100%; background:var(--primary); width:0%; transition:width .3s ease; }
+    .list { list-style:none; margin:0; padding:0; }
+    .li { padding:10px 0; border-bottom:1px solid #e5e7eb; display:flex; justify-content:space-between; gap:8px; font-size:14px; }
+    .tabs { display:flex; gap:8px; margin-top:12px; }
+    .tab { flex:1; padding:10px; border-radius:12px; border:1px solid #e5e7eb; background:#fff; text-align:center; font-weight:600; cursor:pointer; }
+    .tab.active { background:var(--primary); color:#fff; border-color:var(--primary); }
+    .hidden { display:none !important; }
+    .center { min-height:calc(100dvh - 56px); display:grid; place-items:center; padding:16px; }
+    .spacer { height:12px; }
+  </style>
+</head>
+<body>
+  <!-- Navigationsleiste -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <strong>KonfiLog</strong>
+      <div>
+        <button id="btnGuardian" class="link hidden">Aufsicht</button>
+        <button id="btnAdmin" class="link hidden">Admin</button>
+        <button id="btnLogout" class="link hidden">Logout</button>
+        <button id="btnGoLogin" class="link">Login</button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Login Screen -->
+  <main id="screenLogin" class="center">
+    <div class="wrap">
+      <div class="card">
+        <h1>Anmelden</h1>
+        <form id="formLogin" class="row">
+          <div>
+            <label>E‑Mail</label>
+            <input id="loginEmail" type="email" required />
+          </div>
+          <div>
+            <label>Passwort</label>
+            <input id="loginPassword" type="password" required />
+          </div>
+          <button id="btnLogin" type="submit">Einloggen</button>
+        </form>
+        <div class="spacer"></div>
+        <p class="muted">Noch kein Konto? <button class="link" id="goRegister">Registrieren</button></p>
+        <p id="loginErr" class="muted"></p>
+      </div>
+    </div>
+  </main>
+
+  <!-- Registrierung -->
+  <main id="screenRegister" class="center hidden">
+    <div class="wrap">
+      <div class="card">
+        <h1>Registrieren</h1>
+        <form id="formRegister" class="row">
+          <div>
+            <label>Vorname</label>
+            <input id="regFirst" required />
+          </div>
+          <div>
+            <label>Nachname</label>
+            <input id="regLast" required />
+          </div>
+          <div>
+            <label>E‑Mail</label>
+            <input id="regEmail" type="email" required />
+          </div>
+          <div>
+            <label>Passwort (mind. 6 Zeichen)</label>
+            <input id="regPassword" type="password" minlength="6" required />
+          </div>
+          <div>
+            <label>Emoji‑Icon</label>
+            <select id="regEmoji">
+              <option value="😀">😀</option>
+              <option value="😊">😊</option>
+              <option value="🙏">🙏</option>
+              <option value="🎵">🎵</option>
+              <option value="🌟">🌟</option>
+              <option value="🎉">🎉</option>
+              <option value="🏃‍♂️">🏃‍♂️</option>
+              <option value="🎸">🎸</option>
+              <option value="🕊️">🕊️</option>
+            </select>
+          </div>
+          <div>
+            <label>Rolle</label>
+            <select id="regRole">
+              <option value="student">Konfirmand*in</option>
+              <option value="guardian">Aufsichtsperson</option>
+            </select>
+          </div>
+          <button id="btnRegister" type="submit">Konto erstellen</button>
+        </form>
+        <p id="regErr" class="muted"></p>
+      </div>
+    </div>
+  </main>
+
+  <!-- Dashboard für Konfirmand*innen -->
+  <main id="screenApp" class="hidden">
+    <div class="wrap">
+      <div class="card">
+        <h1 id="hello">Hallo</h1>
+        <p class="muted">Punktestand</p>
+        <div class="progress"><div id="progressBar" class="progress-bar"></div></div>
+        <p class="muted"><span id="points">0</span>/20 Punkte</p>
+        <div class="row" style="margin-top:12px">
+          <button id="btnVisit">Gottesdienst besucht</button>
+          <button id="btnActivity">Aktivität +1</button>
+        </div>
+        <div class="tabs">
+          <button id="tabFeed" class="tab active">Übersicht</button>
+          <button id="tabInfo" class="tab">Mitteilungen</button>
+          <button id="tabDocs" class="tab">Material</button>
+        </div>
+      </div>
+      <div class="spacer"></div>
+      <div id="cardFeed" class="card">
+        <h2>Deine Einträge</h2>
+        <ul id="listMy" class="list"></ul>
+      </div>
+      <div id="cardInfo" class="card hidden">
+        <h2>Mitteilungen</h2>
+        <p class="muted">Hier erscheinen Infos aus der Gemeinde.</p>
+      </div>
+      <div id="cardDocs" class="card hidden">
+        <h2>Material</h2>
+        <p class="muted">Hier kannst du später PDFs/Links bereitstellen.</p>
+      </div>
+      <div class="spacer"></div>
+      <div class="card">
+        <h2>Rechtliches</h2>
+        <p>
+          <a class="link" href="#" id="linkPrivacy">Datenschutz</a> ·
+          <a class="link" href="#" id="linkImpressum">Impressum</a>
+        </p>
+      </div>
+    </div>
+  </main>
+
+  <!-- Dashboard für Aufsichtspersonen -->
+  <main id="screenGuardian" class="hidden">
+    <div class="wrap">
+      <div class="card">
+        <h1>Aufsicht</h1>
+        <p class="muted">Diese Ansicht erlaubt ausschließlich das Lesen der Einträge.</p>
+        <div class="card">
+          <h2>Konfirmand*innen</h2>
+          <ul id="listUsersGuardian" class="list"></ul>
+        </div>
+        <div class="spacer"></div>
+        <div class="card">
+          <h2>Ereignisse</h2>
+          <ul id="listVisitsGuardian" class="list"></ul>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Dashboard für Administrator*innen -->
+  <main id="screenAdmin" class="hidden">
+    <div class="wrap">
+      <div class="card">
+        <h1>Admin‑Übersicht</h1>
+        <p class="muted">Hier kannst du alle Nutzer*innen und Einträge einsehen.</p>
+        <div class="card">
+          <h2>Konfirmand*innen & Aufsicht</h2>
+          <ul id="listUsers" class="list"></ul>
+        </div>
+        <div class="spacer"></div>
+        <div class="card">
+          <h2>Ereignisse</h2>
+          <ul id="listVisits" class="list"></ul>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Rechtliches (Datenschutz / Impressum) -->
+  <main id="screenLegal" class="center hidden">
+    <div class="wrap">
+      <div class="card">
+        <h1 id="legalTitle">Rechtliches</h1>
+        <p id="legalBody" class="muted" style="white-space:pre-line">
+          <!--
+            Hinweis: Ersetzen Sie die folgenden Platzhalter durch die tatsächlichen
+            Angaben Ihrer Kirchengemeinde. Beachten Sie insbesondere Art. 5 und
+            Art. 13 DSGVO sowie § 5 DDG (Impressumspflicht). Achten Sie darauf,
+            dass Sie eine Auftragsverarbeitungsvereinbarung mit Google/Firebase
+            abgeschlossen haben und dass Sie die Einwilligungen der Erziehungsberechtigten
+            von Minderjährigen einholen.
+          -->
+          Datenschutzerklärung
+          =====================
+          Verantwortliche Stelle: Name der Kirchengemeinde, Adresse, Ansprechpartner.
+
+          Zweck der Verarbeitung: Protokollierung von Gottesdienst‑ und
+          Aktivitätsbesuchen der Konfirmand*innen; Verwaltung der Punktestände.
+
+          Rechtsgrundlage: Einwilligung gemäß Art. 6 Abs. 1 Buchst. a DSGVO für
+          Standortdaten; ggf. berechtigtes Interesse gemäß Art. 6 Abs. 1 Buchst. f
+          DSGVO. Bei Minderjährigen unter 16 Jahren ist die Einwilligung der
+          Erziehungsberechtigten erforderlich.
+
+          Empfänger: Firebase (Google Ireland Limited) als Auftragsverarbeiter.
+          Datenübermittlung in Drittländer auf Basis des EU‑US Data Privacy Framework
+          und Standardvertragsklauseln. Siehe https://firebase.google.com/support/privacy
+
+          Speicherdauer: Die Daten werden spätestens zwölf Monate nach der
+          Konfirmation gelöscht.
+
+          Betroffenenrechte: Sie haben das Recht auf Auskunft, Berichtigung,
+          Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit sowie
+          Widerruf Ihrer Einwilligung. Sie können sich mit Beschwerden an die
+          zuständige Aufsichtsbehörde wenden.
+
+          Impressum
+          ==========
+          Anbieter: Name der Kirchengemeinde, Adresse, Kontaktdaten (Telefon,
+          E‑Mail). Vertreten durch den Vorstand bzw. die Pfarrerin/den Pfarrer.
+
+          Verantwortlich für den Inhalt: Name, Position.
+
+          Umsatzsteuer‑Identifikationsnummer: (falls vorhanden).
+
+          Dies ist ein kirchliches Angebot gemäß § 5 des Digitale‑Dienste‑Gesetzes
+          (DDG). Weitere rechtliche Hinweise können hier ergänzt werden.
+        </p>
+      </div>
+    </div>
+  </main>
+
+  <!-- Firebase + App Code (ES Modules) -->
+  <script type="module">
+    // Import der Firebase SDKs (Modular v10).
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
+    import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-analytics.js";
+    import {
+      getAuth,
+      onAuthStateChanged,
+      signInWithEmailAndPassword,
+      createUserWithEmailAndPassword,
+      signOut
+    } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js";
+    import {
+      getFirestore,
+      doc,
+      getDoc,
+      setDoc,
+      updateDoc,
+      collection,
+      addDoc,
+      getDocs,
+      query,
+      where,
+      orderBy,
+      serverTimestamp
+    } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
+    import {
+      initializeAppCheck,
+      ReCaptchaV3Provider
+    } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app-check.js";
+
+    // Firebase Konfiguration. Der storageBucket wurde korrigiert (konfilog.appspot.com).
+    const firebaseConfig = {
+      apiKey: "AIzaSyDpNf0lFK1jv741mCx29Glri4p1ZC6wbvk",
+      authDomain: "konfilog.firebaseapp.com",
+      projectId: "konfilog",
+      storageBucket: "konfilog.appspot.com",
+      messagingSenderId: "133206444282",
+      appId: "1:133206444282:web:63b99320fd2663ef5a6143",
+      measurementId: "G-YBD73Z4TZ1"
+    };
+
+    // Firebase initialisieren
+    const app = initializeApp(firebaseConfig);
+    try { getAnalytics(app); } catch (_) {}
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    // Firebase App Check mit reCAPTCHA v3. Ersetze YOUR_RECAPTCHA_V3_SITE_KEY durch deinen Site‑Key.
+    // Für lokale Entwicklung kann das Debug‑Token aktiviert werden: self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+    initializeAppCheck(app, {
+      provider: new ReCaptchaV3Provider('YOUR_RECAPTCHA_V3_SITE_KEY'),
+      isTokenAutoRefreshEnabled: true
+    });
+
+    // DOM Utilities
+    const $ = (id) => document.getElementById(id);
+    const show = (el) => el.classList.remove('hidden');
+    const hide = (el) => el.classList.add('hidden');
+    const setProgress = (pct) => {
+      $('progressBar').style.width = Math.max(0, Math.min(100, pct)) + '%';
+    };
+
+    // Screens für Navigation
+    const screens = {
+      login: $('screenLogin'),
+      register: $('screenRegister'),
+      app: $('screenApp'),
+      guardian: $('screenGuardian'),
+      admin: $('screenAdmin'),
+      legal: $('screenLegal')
+    };
+    function go(screen) {
+      Object.values(screens).forEach(hide);
+      show(screens[screen]);
+    }
+
+    // Tabs innerhalb des Konfi‑Dashboards
+    $('tabFeed').onclick = () => {
+      $('tabFeed').classList.add('active'); $('tabInfo').classList.remove('active'); $('tabDocs').classList.remove('active');
+      show($('cardFeed')); hide($('cardInfo')); hide($('cardDocs'));
+    };
+    $('tabInfo').onclick = () => {
+      $('tabInfo').classList.add('active'); $('tabFeed').classList.remove('active'); $('tabDocs').classList.remove('active');
+      show($('cardInfo')); hide($('cardFeed')); hide($('cardDocs'));
+    };
+    $('tabDocs').onclick = () => {
+      $('tabDocs').classList.add('active'); $('tabFeed').classList.remove('active'); $('tabInfo').classList.remove('active');
+      show($('cardDocs')); hide($('cardFeed')); hide($('cardInfo'));
+    };
+
+    // Rechtliche Links
+    $('linkPrivacy').onclick = (e) => {
+      e.preventDefault();
+      $('legalTitle').textContent = 'Datenschutz';
+      go('legal');
+    };
+    $('linkImpressum').onclick = (e) => {
+      e.preventDefault();
+      $('legalTitle').textContent = 'Impressum';
+      go('legal');
+    };
+
+    // Nav Buttons
+    $('btnGoLogin').onclick = () => go('login');
+    $('goRegister').onclick = () => go('register');
+    $('btnLogout').onclick = async () => { await signOut(auth); };
+
+    // Authentifizierung: Login
+    $('formLogin').onsubmit = async (e) => {
+      e.preventDefault();
+      $('loginErr').textContent = '';
+      $('btnLogin').disabled = true;
+      try {
+        await signInWithEmailAndPassword(auth, $('loginEmail').value, $('loginPassword').value);
+      } catch (err) {
+        $('loginErr').textContent = err.message;
+      } finally {
+        $('btnLogin').disabled = false;
+      }
+    };
+
+    // Registrierung
+    $('formRegister').onsubmit = async (e) => {
+      e.preventDefault();
+      $('regErr').textContent = '';
+      $('btnRegister').disabled = true;
+      try {
+        const cred = await createUserWithEmailAndPassword(auth, $('regEmail').value, $('regPassword').value);
+        const uid = cred.user.uid;
+        // Benutzerprofil in Firestore speichern
+        await setDoc(doc(db, 'users', uid), {
+          displayName: `${$('regFirst').value} ${$('regLast').value}`.trim(),
+          firstName: $('regFirst').value,
+          lastName: $('regLast').value,
+          email: $('regEmail').value,
+          role: $('regRole').value,
+          emoji: $('regEmoji').value,
+          createdAt: serverTimestamp(),
+          points: 0,
+          visits: 0
+        });
+      } catch (err) {
+        $('regErr').textContent = err.message;
+      } finally {
+        $('btnRegister').disabled = false;
+      }
+    };
+
+    // Punkteberechnung
+    const TOTAL_NEEDED = 20;
+    function updateProgress(points) {
+      const pct = Math.round((points / TOTAL_NEEDED) * 100);
+      setProgress(pct);
+      $('points').textContent = points || 0;
+    }
+
+    // Daten laden
+    async function loadProfile(uid) {
+      const d = await getDoc(doc(db, 'users', uid));
+      return d.exists() ? d.data() : null;
+    }
+    async function loadMyVisits(uid) {
+      $('listMy').innerHTML = '';
+      const qv = query(collection(db, 'visits'), where('uid', '==', uid), orderBy('createdAt', 'desc'));
+      const snap = await getDocs(qv);
+      snap.forEach(docu => {
+        const v = docu.data();
+        const li = document.createElement('li');
+        li.className = 'li';
+        const when = v.createdAt?.toDate?.() ? v.createdAt.toDate().toLocaleString() : '—';
+        li.innerHTML = `<span><strong>${v.type === 'service' ? 'Gottesdienst' : 'Aktivität'}</strong> – ${v.place || '-'}</span><span class="muted">${when}</span>`;
+        $('listMy').appendChild(li);
+      });
+    }
+    async function loadGuardianLists() {
+      // Nutzerliste
+      $('listUsersGuardian').innerHTML = '';
+      const us = await getDocs(collection(db, 'users'));
+      us.forEach(u => {
+        const v = u.data();
+        const li = document.createElement('li');
+        li.className = 'li';
+        li.innerHTML = `<span>${v.displayName || v.email}</span><span class="muted">${v.points || 0} Punkte / ${v.visits || 0} Besuche</span>`;
+        $('listUsersGuardian').appendChild(li);
+      });
+      // Besuchsliste
+      $('listVisitsGuardian').innerHTML = '';
+      const vs = await getDocs(collection(db, 'visits'));
+      vs.forEach(x => {
+        const v = x.data();
+        const li = document.createElement('li');
+        li.className = 'li';
+        const when = v.createdAt?.toDate?.() ? v.createdAt.toDate().toLocaleString() : '—';
+        li.innerHTML = `<span><strong>${v.type === 'service' ? 'Gottesdienst' : 'Aktivität'}</strong> – ${v.place || '-'}</span><span class="muted">${when}</span>`;
+        $('listVisitsGuardian').appendChild(li);
+      });
+    }
+    async function loadAdminLists() {
+      $('listUsers').innerHTML = '';
+      const us = await getDocs(collection(db, 'users'));
+      us.forEach(u => {
+        const v = u.data();
+        const li = document.createElement('li');
+        li.className = 'li';
+        li.innerHTML = `<span>${v.displayName || v.email}</span><span class="muted">${v.points || 0} Punkte / ${v.visits || 0} Besuche</span>`;
+        $('listUsers').appendChild(li);
+      });
+      $('listVisits').innerHTML = '';
+      const vs = await getDocs(collection(db, 'visits'));
+      vs.forEach(x => {
+        const v = x.data();
+        const li = document.createElement('li');
+        li.className = 'li';
+        const when = v.createdAt?.toDate?.() ? v.createdAt.toDate().toLocaleString() : '—';
+        li.innerHTML = `<span><strong>${v.type === 'service' ? 'Gottesdienst' : 'Aktivität'}</strong> – ${v.place || '-'}</span><span class="muted">${when}</span>`;
+        $('listVisits').appendChild(li);
+      });
+    }
+
+    // Aktionen: Gottesdienst besuchen & Aktivität hinzufügen
+    async function trackVisit(uid) {
+      if (!confirm('Darf dein Standort einmalig verwendet werden, um diesen Besuch zu verifizieren?')) return;
+      const coords = await new Promise((resolve, reject) => {
+        if (!navigator.geolocation) return reject(new Error('Geolocation nicht verfügbar'));
+        navigator.geolocation.getCurrentPosition(
+          (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+          (err) => reject(err),
+          { enableHighAccuracy:true, timeout:15000 }
+        );
+      });
+      const place = prompt('Wo fand der Gottesdienst statt? (Ort/Kirche)') || 'unbekannt';
+      await addDoc(collection(db, 'visits'), {
+        uid,
+        place,
+        coords,
+        createdAt: serverTimestamp(),
+        type: 'service',
+        points: 1
+      });
+      const uref = doc(db, 'users', uid);
+      const prev = await getDoc(uref);
+      const data = prev.data() || { points:0, visits:0 };
+      await updateDoc(uref, { points: (data.points||0) + 1, visits: (data.visits||0) + 1 });
+      await refresh(uid);
+      alert('Besuch gespeichert. Danke!');
+    }
+    async function addActivity(uid) {
+      const label = prompt('Welche Aktivität (z. B. Hilfe beim Basar)?');
+      if (!label) return;
+      await addDoc(collection(db, 'visits'), {
+        uid,
+        place: label,
+        createdAt: serverTimestamp(),
+        type: 'activity',
+        points: 1
+      });
+      const uref = doc(db, 'users', uid);
+      const prev = await getDoc(uref);
+      const data = prev.data() || { points:0 };
+      await updateDoc(uref, { points: (data.points||0) + 1 });
+      await refresh(uid);
+      alert('Aktivität erfasst.');
+    }
+    $('btnVisit').onclick = async () => { const u = auth.currentUser; if (u) await trackVisit(u.uid); };
+    $('btnActivity').onclick = async () => { const u = auth.currentUser; if (u) await addActivity(u.uid); };
+    $('btnAdmin').onclick = () => { go('admin'); loadAdminLists(); };
+    $('btnGuardian').onclick = () => { go('guardian'); loadGuardianLists(); };
+
+    // Aktualisierung des Dashboards
+    async function refresh(uid) {
+      const profile = await loadProfile(uid);
+      $('hello').textContent = `Hallo${profile?.firstName ? ', ' + profile.firstName : ''}${profile?.emoji ? ' ' + profile.emoji : ''}!`;
+      updateProgress(profile?.points || 0);
+      await loadMyVisits(uid);
+    }
+
+    // Rollen bestimmen
+    async function isAdmin(uid) {
+      const d = await getDoc(doc(db, 'users', uid));
+      return d.exists() && d.data().role === 'admin';
+    }
+    async function isGuardian(uid) {
+      const d = await getDoc(doc(db, 'users', uid));
+      return d.exists() && d.data().role === 'guardian';
+    }
+
+    // Auth‑Status überwachen
+    onAuthStateChanged(auth, async (user) => {
+      // Navigation zurücksetzen
+      hide($('btnAdmin')); hide($('btnGuardian')); hide($('btnLogout'));
+      show($('btnGoLogin'));
+      if (user) {
+        // Eingeloggt
+        $('btnLogout').classList.remove('hidden');
+        $('btnGoLogin').classList.add('hidden');
+        const uid = user.uid;
+        const admin = await isAdmin(uid);
+        const guardian = await isGuardian(uid);
+        if (admin) show($('btnAdmin'));
+        if (guardian) show($('btnGuardian'));
+        if (admin) {
+          go('admin');
+          await loadAdminLists();
+        } else if (guardian) {
+          go('guardian');
+          await loadGuardianLists();
+        } else {
+          go('app');
+          await refresh(uid);
+        }
+      } else {
+        // Nicht eingeloggt
+        go('login');
+      }
+    });
+
+    // Service Worker Registrierung (PWA)
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js')
+          .catch((err) => console.warn('Service Worker Registrierung fehlgeschlagen:', err));
+      });
+    }
+
+    // Firestore Security Rules (als Hinweis für Firebase‑Konsole)
+    /*
+    // rules_version = '2';
+    service cloud.firestore {
+      match /databases/{database}/documents {
+        function signedIn() { return request.auth != null; }
+        function isAdmin() {
+          return signedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+        }
+        function isGuardian() {
+          return signedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'guardian';
+        }
+
+        match /users/{uid} {
+          // Lesen: eigene Daten, Admin oder Guardian
+          allow read: if signedIn() && (request.auth.uid == uid || isAdmin() || isGuardian());
+          // Erstellen: nur eigener Benutzer
+          allow create: if signedIn() && request.auth.uid == uid;
+          // Aktualisieren: eigener Benutzer oder Admin
+          allow update: if signedIn() && (request.auth.uid == uid || isAdmin());
+          // Löschen ist verboten
+          allow delete: if false;
+        }
+        match /visits/{id} {
+          // Anlegen: nur der/die Besitzer*in, type darf nur 'service' oder 'activity' sein und Punkte 0 oder 1
+          allow create: if signedIn()
+            && request.resource.data.uid == request.auth.uid
+            && request.resource.data.type in ['service','activity']
+            && request.resource.data.points in [0,1];
+          // Lesen: Besitzer*in, Admin oder Guardian
+          allow read: if signedIn() && (resource.data.uid == request.auth.uid || isAdmin() || isGuardian());
+          // Bearbeiten/Löschen: nur Admin
+          allow update, delete: if isAdmin();
+        }
+      }
+    }
+    */
+  </script>
+
+  <!-- Offline‑Fallback Styles (optional) -->
+</body>
+</html>
