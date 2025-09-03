@@ -1,0 +1,45 @@
+name: Deploy to GitHub Pages
+
+# Diese GitHub‑Actions Workflow‑Datei baut das Projekt (falls ein Build‑Schritt
+# vorhanden ist) und veröffentlicht den Inhalt im Ordner "dist" auf dem
+# gh‑pages Branch. Für reine HTML‑/JS‑Projekte kann der publish_dir
+# entsprechend angepasst werden (z. B. auf die Wurzel des Repos).
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+          fi
+      # Build (falls vorhanden). Für reine HTML-Projekte kann dieser Schritt
+      # entfallen, dann sollte publish_dir unten auf "." gesetzt werden.
+      - name: Build project
+        run: |
+          if [ -f package.json ] && grep -q '"build"' package.json; then
+            npm run build
+          fi
+      # Deploy mit peaceiris/actions-gh-pages
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Der Ordner, der veröffentlicht werden soll. Bei Vite/React ist dies "dist".
+          # Falls Sie nur statische HTML-Dateien deployen, stellen Sie publish_dir auf "." ein.
+          publish_dir: ./dist
