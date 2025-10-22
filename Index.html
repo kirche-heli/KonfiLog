@@ -70,6 +70,7 @@
           </div>
           <p class="muted" style="margin:6px 0 0 0">Kein Passwort gesetzt oder vergessen? <button id="resetPwBtn" class="secondary" style="width:auto;padding:6px 10px">Passwort zurücksetzen</button></p>
           <p class="muted">Mit der Registrierung stimmst du zu, dass Standortdaten beim Check in verarbeitet werden. Der Standort wird nur gespeichert, um den Besuch zu verifizieren.</p>
+          <p id="authError" class="muted" style="margin-top:8px;color:#fca5a5"></p>
         </div>
 
         <div id="profileBox" class="hidden">
@@ -258,6 +259,17 @@
     }
     renderEmojis();
 
+    function mapAuthError(err){
+      const c = err && err.code ? String(err.code) : '';
+      if(c.includes('auth/network-request-failed')) return 'Netzwerkfehler. Öffne die Seite über HTTPS oder localhost.';
+      if(c.includes('auth/invalid-email')) return 'Die E Mail Adresse ist ungültig.';
+      if(c.includes('auth/invalid-credential') || c.includes('auth/wrong-password')) return 'E Mail oder Passwort ist falsch.';
+      if(c.includes('auth/user-not-found')) return 'Kein Konto gefunden. Bitte zuerst registrieren.';
+      if(c.includes('auth/too-many-requests')) return 'Zu viele Versuche. Bitte warte kurz und versuche es erneut.';
+      if(c.includes('auth/unauthorized-domain')) return 'Domain nicht autorisiert. Bitte github.io in Firebase freigeben.';
+      return 'Fehler: ' + (err?.message || 'Unbekannt');
+    }
+
     // Auth State
     onAuthStateChanged(auth, async (user) => {
       if(user){
@@ -281,6 +293,7 @@
         adminBox.style.display = isAdmin ? 'block' : 'none';
         if(isAdmin){
           fillCohortFilter();
+          await ensureDefaultChurches();
           loadAdminOverview();
         }
 
@@ -301,27 +314,39 @@
     // Auth Funktionen
     async function resetPw(){
       const mail = emailEl.value.trim();
-      if(!mail){ alert('Bitte E Mail eintragen'); return; }
+      if(!mail){ authError.textContent = 'Bitte E Mail für das Zurücksetzen eintragen.'; return; }
       try{
+        authError.textContent = '';
         await sendPasswordResetEmail(auth, mail);
-        alert('E Mail zum Zurücksetzen wurde gesendet');
+        authError.style.color = '#86efac';
+        authError.textContent = 'E Mail zum Zurücksetzen wurde gesendet.';
+        setTimeout(()=>{ authError.style.color = '#fca5a5'; }, 4000);
       } catch(e){
-        alert('Zurücksetzen fehlgeschlagen: ' + e.message);
+        authError.textContent = mapAuthError(e);
       }
     }
 
     async function login(){
       try{
-        await signInWithEmailAndPassword(auth, emailEl.value.trim(), pwEl.value);
+        const mail = emailEl.value.trim();
+        const pw = pwEl.value;
+        if(!mail || !pw){ authError.textContent = 'Bitte E Mail und Passwort eintragen.'; return; }
+        authError.textContent = '';
+        await signInWithEmailAndPassword(auth, mail, pw);
       }catch(e){
-        alert('Login fehlgeschlagen: ' + e.message);
+        authError.textContent = mapAuthError(e);
       }
     }
     async function register(){
       try{
-        await createUserWithEmailAndPassword(auth, emailEl.value.trim(), pwEl.value);
+        const mail = emailEl.value.trim();
+        const pw = pwEl.value;
+        if(!mail || !pw){ authError.textContent = 'Bitte E Mail und ein neues Passwort eintragen.'; return; }
+        if(pw.length < 6){ authError.textContent = 'Das Passwort muss mindestens 6 Zeichen haben.'; return; }
+        authError.textContent = '';
+        await createUserWithEmailAndPassword(auth, mail, pw);
       }catch(e){
-        alert('Registrierung fehlgeschlagen: ' + e.message);
+        authError.textContent = mapAuthError(e);
       }
     }
 
@@ -472,6 +497,17 @@
         rows.push(`<tr><td>${data.emoji || '🙂'} ${name}</td><td>${data.cohort || ''}</td><td>${svc.size}</td><td>${crs.size}</td><td>${lastTs ? lastTs.toLocaleString() : ''}</td></tr>`);
       }
       adminTableBody.innerHTML = rows.join('') || '<tr><td colspan="5" class="muted">Keine Daten</td></tr>';
+    }
+
+    // Seed: Standardkirche einmalig anlegen
+    async function ensureDefaultChurches(){
+      const targetName = 'Ev. Stadtkirche Hessisch Lichtenau';
+      const snap = await getDocs(collection(db,'churches'));
+      let exists = false;
+      snap.forEach(d => { if((d.data().name||'').toLowerCase() === targetName.toLowerCase()) exists = true; });
+      if(!exists){
+        await addDoc(collection(db,'churches'), { name: targetName, lat: 51.19780, lng: 9.70790, radiusMeters: 250 });
+      }
     }
 
     // Admin Kirchenorte
